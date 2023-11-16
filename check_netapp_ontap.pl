@@ -1,14 +1,15 @@
 #!/usr/bin/perl
 
 # Script name:      check_netapp_ontap.pl
-# Version:          v3.05.210414
+# Version:	        v3.01.171611
 # Original author:  Murphy John
 # Current author:   D'Haese Willem
-# Contributors:     Yip Wai Peng, Anriot Alexandre, Charton Yannick, Goetheyn Tony, Malone Josh
+# Contributors:     Waipeng, Ditol, Charton Yannick, Tony Goetheyn
 # Purpose:          Checks NetApp ontapi clusters for various problems, like volume, aggregate, snapshot,
 #                   quota, snapmirror, filer hardware, port, interface, cluster and disk health, but also NetApp alarms
-# On Github:        https://github.com/OutsideIT/check_netapp_ontap
+# On Github:        https://github.com/willemdh/check_netapp_ontap
 # On OutsideIT:     https://outsideit.net/monitoring-netapp-ontap/
+#
 # Copyright:
 #   This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published
 #   by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. This program is distributed
@@ -16,15 +17,14 @@
 #   PARTICULAR PURPOSE. See the GNU General Public License for more details. You should have received a copy of the GNU General Public
 #   License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use warnings;
+#use warnings;
 use strict;
 use NaServer;
 use NaElement;
 use Getopt::Long;
 use POSIX;
-
-# do not show smartmatch warnings on older perl versions
-no if $] >= 5.017011, warnings => 'experimental::smartmatch';
+# no warnings
+no warnings 'experimental::smartmatch';
 
 my $verbose = undef;
 my $debug = undef;
@@ -50,7 +50,7 @@ sub get_disk_info {
 		$nahDiskIterator->child_add($nahQuery);
 		$nahQuery->child_add($nahDiskInfo);
 		$nahDiskInfo->child_add($nahDiskOwnerInfo);
-		$nahDiskOwnerInfo->child_add_string("home-node-name", $strVHost);
+		$nahDiskOwnerInfo->child_add_string("home-node", $strVHost);
 	}
 
 	while(defined($strActiveTag)) {
@@ -185,7 +185,7 @@ sub get_spare_info {
 		$nahSpareIterator->child_add($nahQuery);
 		$nahQuery->child_add($nahSpareInfo);
 		$nahSpareInfo->child_add($nahSpareOwnerInfo);
-		$nahSpareOwnerInfo->child_add_string("home-node-name", $strVHost);
+		$nahSpareOwnerInfo->child_add_string("home-node", $strVHost);
 	}
 
 	while(defined($strActiveTag)) {
@@ -221,53 +221,6 @@ sub get_spare_info {
 				$hshSpareInfo{$nodeName}{$strSpareName}{'zeroed'} = $zeroed;
 			} else {
 				next SPARE;
-			}
-		}
-	}
-
-	# Include ADP spares, which are only reported under aggregate spares (not in the spare container)
-	$nahSpareIterator = NaElement->new("aggr-spare-get-iter");
-	$nahQuery = NaElement->new("query");
-	$nahSpareInfo = NaElement->new("storage-disk-info");
-	$nahSpareOwnerInfo = NaElement->new("disk-ownership-info");
-	$strActiveTag = "";
-
-	if (defined($strVHost)) {
-		$nahSpareIterator->child_add($nahQuery);
-		$nahQuery->child_add($nahSpareInfo);
-		$nahSpareInfo->child_add($nahSpareOwnerInfo);
-		$nahSpareOwnerInfo->child_add_string("original-owner", $strVHost);
-	}
-
-	while(defined($strActiveTag)) {
-		if ($strActiveTag ne "") {
-			$nahSpareIterator->child_add_string("tag", $strActiveTag);
-		}
-
-		$nahSpareIterator->child_add_string("max-records", 600);
-		my $nahResponse = $nahStorage->invoke_elem($nahSpareIterator);
-		validate_ontapi_response($nahResponse, "Failed filer health query: ");
-
-		$strActiveTag = $nahResponse->child_get_string("next-tag");
-
-		if ($nahResponse->child_get_string("num-records") == 0) {
-			last;
-		}
-
-		SPARE:
-		foreach my $nahSpare ($nahResponse->child_get("attributes-list")->children_get()) {
-			my $strSpareName = $nahSpare->child_get_string("disk");
-			my $strUsableBlk = $nahSpare->child_get_string("local-usable-data-size-blks");
-
-			# Skip root partition spares
-			if (!defined($strUsableBlk)) {
-				next SPARE;
-			} else {
-				my $nodeName = $nahSpare->child_get_string("original-owner");
-				my $zeroed = $nahSpare->child_get_string('is-disk-zeroed');
-
-				$hshSpareInfo{$nodeName}{$strSpareName}{'status'} = 'spare';
-				$hshSpareInfo{$nodeName}{$strSpareName}{'zeroed'} = $zeroed;
 			}
 		}
 	}
@@ -667,7 +620,6 @@ sub get_cluster_health {
 	my $nahClusterInfo = NaElement->new("cluster-peer-health-info");
 	my $strActiveTag = "";
 	my %hshClusterInfo;
-	my %reachableClusters;
 
 	if (defined($strVHost)) {
 		$nahClusterIterator->child_add($nahQuery);
@@ -691,23 +643,11 @@ sub get_cluster_health {
 		}
 
 		foreach my $nahNode ($nahResponse->child_get("attributes-list")->children_get()) {
-			my $originNode = $nahNode->child_get_string("originating-node");
-			my $destinationNode = $nahNode->child_get_string("destination-node");
-			my $destinationCluster = $nahNode->child_get_string("destination-cluster");
-			my $strName = "${originNode}_${destinationNode}";
-			$hshClusterInfo{$strName}{'origin'} = $originNode;
-			$hshClusterInfo{$strName}{'destination'} = $destinationNode;
-			$hshClusterInfo{$strName}{'destination-cluster'} = $destinationCluster;
+			my $strName = $nahNode->child_get_string("originating-node");
+			$hshClusterInfo{$strName}{'destination'} = $nahNode->child_get_string("destination-node");
 			$hshClusterInfo{$strName}{'cluster-healthy'} = $nahNode->child_get_string("is-cluster-healthy");
 			$hshClusterInfo{$strName}{'destination-available'} = $nahNode->child_get_string("is-destination-node-available");
 			$hshClusterInfo{$strName}{'in-quorum'} = $nahNode->child_get_string("is-node-healthy");
-			$reachableClusters{$destinationCluster} = $hshClusterInfo{$strName}{'destination-available'} eq 'true' ? 1 : 0;
-		}
-	}
-	# Mark partially unreachable peers
-	foreach (keys %hshClusterInfo) {
-		if ($hshClusterInfo{$_}{'destination-available'} eq 'false' and $reachableClusters{$hshClusterInfo{$_}->{'destination-cluster'}} == 1) {
-			$hshClusterInfo{$_}{'destination-available'} = 'partial';
 		}
 	}
 
@@ -723,21 +663,17 @@ sub calc_cluster_health {
 	foreach my $strNode (keys %$hrefClusterInfo) {
 		$intObjectCount = $intObjectCount + 1;
 		if ($hrefClusterInfo->{$strNode}->{'destination-available'} eq "false") {
-			my $strNewMessage = $hrefClusterInfo->{$strNode}->{'origin'} . "->" . $hrefClusterInfo->{$strNode}->{'destination'} . " destination node is unavailable";
+			my $strNewMessage = $strNode . "->" . $hrefClusterInfo->{$strNode}->{'destination'} . " destination node is unavailable";
 			$strOutput = get_nagios_description($strOutput, $strNewMessage);
 			$intState = get_nagios_state($intState, 2);
 		} elsif ($hrefClusterInfo->{$strNode}->{'in-quorum'} eq "false") {
-			my $strNewMessage = $hrefClusterInfo->{$strNode}->{'origin'} . "->" . $hrefClusterInfo->{$strNode}->{'destination'} . " originating node is not in quorum";
+			my $strNewMessage = $strNode . "->" . $hrefClusterInfo->{$strNode}->{'destination'} . " originating node is not in quorum";
 			$strOutput = get_nagios_description($strOutput, $strNewMessage);
 			$intState = get_nagios_state($intState, 2);
 		} elsif ($hrefClusterInfo->{$strNode}->{'cluster-healthy'} eq "false") {
-			my $strNewMessage = $hrefClusterInfo->{$strNode}->{'origin'} . "->" . $hrefClusterInfo->{$strNode}->{'destination'} . " cluster peer relationship is unhealthy";
+			my $strNewMessage = $strNode . "->" . $hrefClusterInfo->{$strNode}->{'destination'} . " cluster peer relationship is unhealthy";
 			$strOutput = get_nagios_description($strOutput, $strNewMessage);
 			$intState = get_nagios_state($intState, 2);
-		} elsif ($hrefClusterInfo->{$strNode}->{'destination-available'} eq "partial") {
-			my $strNewMessage = $hrefClusterInfo->{$strNode}->{'origin'} . "->" . $hrefClusterInfo->{$strNode}->{'destination'} . " destination node is partially unavailable";
-			$strOutput = get_nagios_description($strOutput, $strNewMessage);
-			$intState = get_nagios_state($intState, 1);
 		}
 	}
 
@@ -1283,14 +1219,6 @@ sub get_quota_space {
 			if ($nahQuota->child_get_string("tree") ne "") {
 				$strQuotaName = $strQuotaName . "/" . $nahQuota->child_get_string("tree");
 			}
-			
-			if ($nahQuota->child_get_string('quota-type') eq 'user') {
-				if ($nahQuota->child_get('quota-users')) {
-					foreach my $quotaUser ($nahQuota->child_get('quota-users')->children_get()) {
-						$strQuotaName .= ":".$quotaUser->child_get_string('quota-user-name');
-					}
-				}
-			}
 
 			$hshQuotaUsage{$strQuotaName}{'sub'} = "get_quota_space";
 			$hshQuotaUsage{$strQuotaName}{'space-hard-limit'} = $nahQuota->child_get_string("disk-limit");
@@ -1320,26 +1248,6 @@ sub calc_quota_health {
 		my $intUsedToBytes = $hrefQuotaInfo->{$strQuota}->{'space-used'}*1024;
 		my $strReadableUsed = space_to_human_readable($intUsedToBytes);
 
-		if ($hrefQuotaInfo->{$strQuota}->{'space-threshold'} ne "-") {
-			if ($hrefQuotaInfo->{$strQuota}->{'space-used'} >= $hrefQuotaInfo->{$strQuota}->{'space-threshold'}) {
-				# my $intThreshToBytes = space_to_bytes($hrefQuotaInfo->{$strQuota}->{'space-threshold'});
-				my $intThreshToBytes = $hrefQuotaInfo->{$strQuota}->{'space-threshold'}*1024;
-		my $strReadableThresh = space_to_human_readable($intThreshToBytes);
-				my $strNewMessage = $strQuota . " - " . $strReadableUsed . "/" . $strReadableThresh . " SPACE USED";
-				$strOutput = get_nagios_description($strOutput, $strNewMessage);
-		$intState = get_nagios_state($intState, 2);
-			}
-		}
-		if ($hrefQuotaInfo->{$strQuota}->{'space-soft-limit'} ne "-") {
-			if ($hrefQuotaInfo->{$strQuota}->{'space-used'} >= $hrefQuotaInfo->{$strQuota}->{'space-soft-limit'}) {
-				# my $intThreshToBytes = space_to_bytes($hrefQuotaInfo->{$strQuota}->{'space-soft-limit'});
-				my $intThreshToBytes = $hrefQuotaInfo->{$strQuota}->{'space-soft-limit'}*1024;
-		my $strReadableThresh = space_to_human_readable($intThreshToBytes);
-				my $strNewMessage = $strQuota . " - " . $strReadableUsed . "/" . $strReadableThresh . " SPACE USED";
-				$strOutput = get_nagios_description($strOutput, $strNewMessage);
-				$intState = get_nagios_state($intState, 1);
-			}
-		}
 		if ($hrefQuotaInfo->{$strQuota}->{'space-hard-limit'} ne "-") {
 			if ($hrefQuotaInfo->{$strQuota}->{'space-used'} >= $hrefQuotaInfo->{$strQuota}->{'space-hard-limit'}) {
 				# my $intThreshToBytes = space_to_bytes($hrefQuotaInfo->{$strQuota}->{'space-hard-limit'});
@@ -1348,6 +1256,24 @@ sub calc_quota_health {
 				my $strNewMessage = $strQuota . " - " . $strReadableUsed . "/" . $strReadableThresh . " SPACE USED";
 				$strOutput = get_nagios_description($strOutput, $strNewMessage);
 		$intState = get_nagios_state($intState, 2);
+			}
+		} elsif ($hrefQuotaInfo->{$strQuota}->{'space-threshold'} ne "-") {
+			if ($hrefQuotaInfo->{$strQuota}->{'space-used'} >= $hrefQuotaInfo->{$strQuota}->{'space-threshold'}) {
+				# my $intThreshToBytes = space_to_bytes($hrefQuotaInfo->{$strQuota}->{'space-threshold'});
+				my $intThreshToBytes = $hrefQuotaInfo->{$strQuota}->{'space-threshold'}*1024;
+		my $strReadableThresh = space_to_human_readable($intThreshToBytes);
+				my $strNewMessage = $strQuota . " - " . $strReadableUsed . "/" . $strReadableThresh . " SPACE USED";
+				$strOutput = get_nagios_description($strOutput, $strNewMessage);
+		$intState = get_nagios_state($intState, 2);
+			}
+		} elsif ($hrefQuotaInfo->{$strQuota}->{'space-soft-limit'} ne "-") {
+			if ($hrefQuotaInfo->{$strQuota}->{'space-used'} >= $hrefQuotaInfo->{$strQuota}->{'space-soft-limit'}) {
+				# my $intThreshToBytes = space_to_bytes($hrefQuotaInfo->{$strQuota}->{'space-soft-limit'});
+				my $intThreshToBytes = $hrefQuotaInfo->{$strQuota}->{'space-soft-limit'}*1024;
+		my $strReadableThresh = space_to_human_readable($intThreshToBytes);
+				my $strNewMessage = $strQuota . " - " . $strReadableUsed . "/" . $strReadableThresh . " SPACE USED";
+				$strOutput = get_nagios_description($strOutput, $strNewMessage);
+				$intState = get_nagios_state($intState, 1);
 			}
 		}
 
@@ -1545,7 +1471,6 @@ sub get_volume_space {
 	my $nahTag = NaElement->new("tag");
 	my $strActiveTag = "";
 	my %hshVolUsage;
-	my $volAutoSizeAttr;
 
 	# Narrow search to only the requested node if configured by user with the -n option
 	if (defined($strVHost)) {
@@ -1598,12 +1523,7 @@ sub get_volume_space {
 				$hshVolUsage{$strVolName}{'state'} = $nahVol->child_get("volume-state-attributes")->child_get_string("state");
 			} else {
 				$hshVolUsage{$strVolName}{'state'} = $nahVol->child_get("volume-state-attributes")->child_get_string("state");
-				$volAutoSizeAttr = $nahVol->child_get('volume-autosize-attributes');
-				if (defined($volAutoSizeAttr) && $volAutoSizeAttr->child_get_string('mode') =~ m/^grow(?:_shrink)$/) {
-					$hshVolUsage{$strVolName}{'space-total'} = $volAutoSizeAttr->child_get_string("maximum-size");
-				} else {
-					$hshVolUsage{$strVolName}{'space-total'} = $nahVol->child_get("volume-space-attributes")->child_get_string("size-total");
-				}
+				$hshVolUsage{$strVolName}{'space-total'} = $nahVol->child_get("volume-space-attributes")->child_get_string("size-total");
 				if ($debug) {
 					if ( $hshVolUsage{$strVolName}{'space-total'} == 0 || $hshVolUsage{$strVolName}{'space-total'} eq '0' ) {
 						print "Volume $strVolName reports size-total of 0\n";
@@ -1631,7 +1551,7 @@ sub calc_space_health {
 	my $intState = 0;
 	my $intObjectCount = 0;
 	my $strOutput;
-	my %perfOutput = ();
+	my $perfOutput;
 	my $hrefObjectState;
 
 	foreach my $strObj (keys %$hrefSpaceInfo) {
@@ -1683,8 +1603,8 @@ sub calc_space_health {
 
 	# Test to see if the monitored object has crossed a defined space threshhold.
 	unless ( (defined($hrefCritThresholds->{'strings'}) && @{$hrefCritThresholds->{'strings'}}) || (defined($hrefWarnThresholds->{'strings'}) && @{$hrefWarnThresholds->{'strings'}}) || $hrefWarnThresholds->{'owner'} || $hrefCritThresholds->{'owner'} ) {
-		($intState, $strOutput, $hrefSpaceInfo) = space_threshold_helper($intState, $strOutput, $hrefSpaceInfo, $hrefCritThresholds, \%perfOutput, 2);
-		($intState, $strOutput, $hrefSpaceInfo) = space_threshold_helper($intState, $strOutput, $hrefSpaceInfo, $hrefWarnThresholds, \%perfOutput, 1);
+		($intState, $strOutput, $perfOutput, $hrefSpaceInfo) = space_threshold_helper($intState, $strOutput, $hrefSpaceInfo, $hrefCritThresholds, 2);
+		($intState, $strOutput, $perfOutput, $hrefSpaceInfo) = space_threshold_helper($intState, $strOutput, $hrefSpaceInfo, $hrefWarnThresholds, 1);
 	}
 
 
@@ -1694,8 +1614,8 @@ sub calc_space_health {
 		$strOutput = "OK - No problem found ($intObjectCount checked)";
 	}
 
-	if (keys(%perfOutput) > 0) {
-		$strOutput .= ("\n| " . join(' ', values(%perfOutput)));
+	if ((defined($perfOutput))) {
+		$strOutput .= $perfOutput;
 	}
 
 
@@ -1705,10 +1625,10 @@ sub calc_space_health {
 
 sub space_threshold_helper {
 	# Test the various monitored object values against the thresholds provided by the user.
-	my ($intState, $strOutput, $hrefVolInfo, $hrefThresholds, $perfOutput, $intAlertLevel) = @_;
+	my ($intState, $strOutput, $hrefVolInfo, $hrefThresholds, $intAlertLevel) = @_;
 
-					 
-							 
+	my $perfOutput = "";
+	my $perfOutputFinal = " | ";
 
 	foreach my $strVol (keys %$hrefVolInfo) {
 		my $bMarkedForRemoval = 0;
@@ -1735,8 +1655,8 @@ sub space_threshold_helper {
 				my $strReadableTotal = space_to_human_readable($hrefVolInfo->{$strVol}->{'space-total'});
 				my $strNewMessage = $strVol . " - " . $strReadableUsed . "/" . $strReadableTotal . " (" . $intUsedPercent . "%) SPACE USED";
 
-				if (!exists($perfOutput->{"space-$strVol"})) {
-					$perfOutput->{"space-$strVol"} = "'" . $strVol . "_usage'=" . $hrefVolInfo->{$strVol}->{'space-used'} . "B;;;0;" . $hrefVolInfo->{$strVol}->{'space-total'};
+				if ($intAlertLevel == 1) {
+					$perfOutput .= "'" . $strVol . "_usage'=" . $hrefVolInfo->{$strVol}->{'space-used'} . "B;;;0;" . $hrefVolInfo->{$strVol}->{'space-total'} . " ";
 				}
 
 				if (defined($hrefThresholds->{'space-percent'}) && defined($hrefThresholds->{'space-count'})) {
@@ -1782,8 +1702,8 @@ sub space_threshold_helper {
 				$intUsedPercent = floor($intUsedPercent + 0.5);
 				my $strNewMessage = $strVol . " - " . $hrefVolInfo->{$strVol}->{'inodes-used'} . "/" . $hrefVolInfo->{$strVol}->{'inodes-total'} . " (" . $intUsedPercent . "%) INODES USED";
 
-				if (!exists($perfOutput->{"inodes-$strVol"})) {
-					$perfOutput->{"inodes-$strVol"} = "'" . $strVol . "_inodes'=" . $hrefVolInfo->{$strVol}->{'inodes-used'} . "B;;;0;" . $hrefVolInfo->{$strVol}->{'inodes-total'};
+				if ($intAlertLevel == 1) {
+					$perfOutput .= "'" . $strVol . "_inodes'=" . $hrefVolInfo->{$strVol}->{'inodes-used'} . "B;;;0;" . $hrefVolInfo->{$strVol}->{'inodes-total'} . " ";
 				}
 
 				if (defined($hrefThresholds->{'inodes-percent'}) && defined($hrefThresholds->{'inodes-count'})) {
@@ -1827,12 +1747,12 @@ sub space_threshold_helper {
 		}
 	}
 
-						   
-											 
-								  
-  
+	if ($intAlertLevel == 1) {
+		#print "perfOutput: " . $perfOutput . "\n";
+		$perfOutputFinal .= $perfOutput;
+	}
 
-	return $intState, $strOutput, $hrefVolInfo;
+	return $intState, $strOutput, $perfOutputFinal, $hrefVolInfo;
 }
 
 sub space_threshold_converter {
@@ -1977,17 +1897,17 @@ sub help {
 
 ===OPTION LIST===
 volume_health
-	desc: Check the space and inode health of a vServer volume. If space % and space in *B are both defined the smaller value of the two will be used when deciding if the volume is in a warning or critical state. This allows you to better accomodate large volume monitoring. Separate values with comma.
+	desc: Check the space and inode health of a vServer volume. If space % and space in *B are both defined the smaller value of the two will be used when deciding if the volume is in a warning or critical state. This allows you to better accomodate large volume monitoring.
 	thresh: Space % used, space in *B (i.e MB) remaining, inode count remaining, inode % used (Usage example: 80%i), "offline" keyword.
 	node: The node option restricts this check by vserver name.
 
 aggregate_health
-	desc: Check the space and inode health of a cluster aggregate. If space % and space in *B are both defined the smaller value of the two will be used when deciding if the volume is in a warning or critical state. This allows you to better accomodate large aggregate monitoring. Separate values with comma.
+	desc: Check the space and inode health of a cluster aggregate. If space % and space in *B are both defined the smaller value of the two will be used when deciding if the volume is in a warning or critical state. This allows you to better accomodate large aggregate monitoring.
 	thresh: Space % used, space in *B (i.e MB) remaining, inode count remaining, inode % used (Usage example: 80%i), "offline" keyword, "is-home" keyword.
 	node: The node option restricts this check by cluster-node name.
 
 snapshot_health
-	desc: Check the space and inode health of a vServer snapshot. If space % and space in *B are both defined the smaller value of the two will be used when deciding if the volume is in a warning or critical state. This allows you to better accomodate large snapshot monitoring. Separate values with comma.
+	desc: Check the space and inode health of a vServer snapshot. If space % and space in *B are both defined the smaller value of the two will be used when deciding if the volume is in a warning or critical state. This allows you to better accomodate large snapshot monitoring.
 	thresh: Space % used, space in *B (i.e MB) remaining, inode count remaining, inode % used (Usage example: 80%i), "offline" keyword.
 	node: The node option restricts this check by vserver name.
 
@@ -2033,7 +1953,7 @@ cluster_health
 	thresh: N/A not customizable.
 	node: The node option restricts this check by cluster-node name.
 
-clusternode_health
+clusternnode_health
 	desc: Check the cluster-nodes for unhealthy conditions
 	thresh: N/A not customizable.
 	node: The node option restricts this check by cluster-node name.
@@ -2449,6 +2369,9 @@ if ($strOption eq "volume_health") {
 
 	($intState, $strOutput) = calc_spare_health($hrefSpareInfo, $strVHost, $strWarning, $strCritical);
 }
+
+## FUTURE STUFF----
+# DISK IO, DE-DUPE LAG
 
 # Print the output and exit with the resulting state.
 $strOutput .= "\n";
